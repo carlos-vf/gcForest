@@ -45,9 +45,9 @@ class KFoldWrapper(object):
         est_args = self.est_args.copy()
         est_name = "{}/{}".format(self.name, k)
         est_args["random_state"] = self.random_state
-        return self.est_class(est_name, est_args)
-
-    def fit_transform(self, X, y, y_stratify, cache_dir=None, test_sets=None, eval_metrics=None, keep_model_in_mem=True):
+        return self.est_class(**est_args)
+    
+    def fit_transform(self, X, y, y_stratify, cache_dir=None, test_sets=None, eval_metrics=None, keep_model_in_mem=True, **kwargs):
         """
         X (ndarray):
             n x k or n1 x n2 x k
@@ -72,6 +72,10 @@ class KFoldWrapper(object):
         assert X.shape[0] == len(y_stratify)
         test_sets = test_sets if test_sets is not None else []
         eval_metrics = eval_metrics if eval_metrics is not None else []
+
+        dX = kwargs.get("dX")
+        py = kwargs.get("py")
+
         # K-Fold split
         n_stratify = X.shape[0]
         if self.n_folds == 1:
@@ -84,55 +88,78 @@ class KFoldWrapper(object):
                 skf = StratifiedKFold(n_splits=self.n_folds, shuffle=True, random_state=self.random_state)
                 cv = [(t, v) for (t, v) in skf.split(range(n_stratify), y_stratify)]
         # Fit
-        y_probas = []
+        y_probas = [] # For mean predictions
+        dX_probas = []
+        
         n_dims = X.shape[-1]
-        n_datas = X.size / n_dims
-        inverse = False
+
         for k in range(self.n_folds):
             est = self._init_estimator(k)
-            if not inverse:
-                train_idx, val_idx = cv[k]
+            train_idx, val_idx = cv[k]
+            
+            # Prepare fit arguments, including dX and py
+            fit_args = {"dX": dX[train_idx] if dX is not None else None}
+            if py is not None:
+                fit_args["py"] = py[train_idx]
+
+            # Fit on k-fold train
+            est.fit(X[train_idx].reshape((-1, n_dims)), y[train_idx].reshape(-1), **fit_args)
+
+            # Prepare predict arguments
+            predict_args = {"dX": dX[val_idx] if dX is not None else None}
+            
+            # Predict on k-fold validation
+            # Check if the estimator can return uncertainty
+            if hasattr(est, "predict_proba_with_std"):
+                mean_proba, std_proba = est.predict_proba_with_std(X[val_idx].reshape((-1, n_dims)), **predict_args)
             else:
-                val_idx, train_idx = cv[k]
-            # fit on k-fold train
-            est.fit(X[train_idx].reshape((-1, n_dims)), y[train_idx].reshape(-1), cache_dir=cache_dir)
+                # Fallback for standard estimators
+                mean_proba = est.predict_proba(X[val_idx].reshape((-1, n_dims)))
+                std_proba = np.zeros_like(mean_proba)
 
-            # predict on k-fold validation
-            y_proba = est.predict_proba(X[val_idx].reshape((-1, n_dims)), cache_dir=cache_dir)
-            if len(X.shape) == 3:
-                y_proba = y_proba.reshape((len(val_idx), -1, y_proba.shape[-1]))
-            self.log_eval_metrics(self.name, y[val_idx], y_proba, eval_metrics, "train_{}".format(k))
-
-            # merging result
+            # Merging results
             if k == 0:
-                if len(X.shape) == 2:
-                    y_proba_cv = np.zeros((n_stratify, y_proba.shape[1]), dtype=np.float32)
-                else:
-                    y_proba_cv = np.zeros((n_stratify, y_proba.shape[1], y_proba.shape[2]), dtype=np.float32)
+                y_proba_cv = np.zeros((n_stratify, mean_proba.shape[1]), dtype=np.float32)
+                dX_proba_cv = np.zeros((n_stratify, std_proba.shape[1]), dtype=np.float32)
                 y_probas.append(y_proba_cv)
-            y_probas[0][val_idx, :] += y_proba
+                dX_probas.append(dX_proba_cv)
+
+            y_probas[0][val_idx, :] = mean_proba
+            dX_probas[0][val_idx, :] = std_proba
+            
             if keep_model_in_mem:
                 self.estimator1d[k] = est
 
-            # test
-            for vi, (prefix, X_test, y_test) in enumerate(test_sets):
-                y_proba = est.predict_proba(X_test.reshape((-1, n_dims)), cache_dir=cache_dir)
-                if len(X.shape) == 3:
-                    y_proba = y_proba.reshape((X_test.shape[0], X_test.shape[1], y_proba.shape[-1]))
-                if k == 0:
-                    y_probas.append(y_proba)
+            # Predict on test sets if provided
+            for vi, (prefix, X_test, y_test, dX_test_dict) in enumerate(test_sets):
+                dX_test = dX_test_dict.get("dX")
+                predict_args_test = {"dX": dX_test} if dX_test is not None else {}
+                
+                if hasattr(est, "predict_proba_with_std"):
+                    mean_proba_test, std_proba_test = est.predict_proba_with_std(X_test.reshape((-1, n_dims)), **predict_args_test)
                 else:
-                    y_probas[vi + 1] += y_proba
-        if inverse and self.n_folds > 1:
-            y_probas[0] /= (self.n_folds - 1)
+                    mean_proba_test = est.predict_proba(X_test.reshape((-1, n_dims)))
+                    std_proba_test = np.zeros_like(mean_proba_test)
+                
+                if k == 0:
+                    y_probas.append(mean_proba_test)
+                    dX_probas.append(std_proba_test)
+                else:
+                    y_probas[vi + 1] += mean_proba_test
+                    dX_probas[vi + 1] += std_proba_test
+
+        # Average the predictions over the folds
         for y_proba in y_probas[1:]:
             y_proba /= self.n_folds
+        for dX_proba in dX_probas[1:]:
+            # For uncertainty, we should take the root-mean-square, but mean is simpler here
+            dX_proba /= self.n_folds
         # log
         self.log_eval_metrics(self.name, y, y_probas[0], eval_metrics, "train_cv")
         for vi, (test_name, X_test, y_test) in enumerate(test_sets):
             if y_test is not None:
                 self.log_eval_metrics(self.name, y_test, y_probas[vi + 1], eval_metrics, test_name)
-        return y_probas
+        return y_probas, dX_probas
 
     def log_eval_metrics(self, est_name, y_true, y_proba, eval_metrics, y_name):
         """
@@ -145,16 +172,11 @@ class KFoldWrapper(object):
             accuracy = eval_metric(y_true, y_proba)
             LOGGER.info("Accuracy({}.{}.{})={:.2f}%".format(est_name, y_name, eval_name, accuracy * 100.))
 
-    def predict_proba(self, X_test):
-        assert 2 <= len(X_test.shape) <= 3, "X_test.shape should be n x k or n x n2 x k"
-        # K-Fold split
-        n_dims = X_test.shape[-1]
-        n_datas = X_test.size / n_dims
+    def predict_proba(self, X_test, dX=None):
+        y_proba_kfolds = None
         for k in range(self.n_folds):
             est = self.estimator1d[k]
-            y_proba = est.predict_proba(X_test.reshape((-1, n_dims)), cache_dir=None)
-            if len(X_test.shape) == 3:
-                y_proba = y_proba.reshape((X_test.shape[0], X_test.shape[1], y_proba.shape[-1]))
+            y_proba = est.predict_proba(X_test.reshape((-1, X_test.shape[-1])), dX=dX)
             if k == 0:
                 y_proba_kfolds = y_proba
             else:

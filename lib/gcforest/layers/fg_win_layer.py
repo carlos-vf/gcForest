@@ -88,28 +88,45 @@ class FGWinLayer(BaseLayer):
                     bottoms = self.data_cache.gets(phase, self.bottom_names)
                     LOGGER.info('[data][{},{}] bottoms.shape={}'.format(self.name, phase, repr_blobs_shape(bottoms)))
                     X, y = np.concatenate(bottoms[:-1], axis=1), bottoms[-1]
+                    
+                    dX = self.data_cache.get(phase, "dX", None)
+                    py = self.data_cache.get(phase, "py", None)
+                    
                     # n x n_windows x channel
                     X_win = get_windows(X, self.win_x, self.win_y, self.stride_x, self.stride_y, self.pad_x, self.pad_y)
                     _, nh, nw, _ = X_win.shape
-                    X_win = X_win.reshape((X_win.shape[0], -1, X_win.shape[-1]))
-                    y_win = y[:,np.newaxis].repeat(X_win.shape[1], axis=1)
-                    if pi == 0:
-                        assert self.n_classes == len(np.unique(y)), \
-                                "n_classes={}, len(unique(y))={}".format(self.n_classes, len(np.unique(y)))
-                        X_train_win, y_train_win = X_win, y_win
+                    y_win = y[:, np.newaxis].repeat(X_win.shape[1], axis=1)
+                    dX_win = get_windows(dX, self.win_x, self.win_y, self.stride_x, self.stride_y, self.pad_x, self.pad_y) if dX is not None else None
+                    if py is not None:
+                        py_win = py[:, np.newaxis, :].repeat(X_win.shape[1], axis=1)
                     else:
-                        test_sets = [("test", X_win, y_win), ]
+                        py_win = None
+
+                    if pi == 0: # Training phase
+                        X_train_win, y_train_win = X_win, y_win
+                        dX_train_win, py_train_win = dX_win, py_win
+                    else: # Testing phase
+                        test_sets = [("test", X_win, y_win, {"dX": dX_win})]
 
             # fit
             est = self._init_estimators(ti, train_config.random_state)
-            y_probas = est.fit_transform(X_train_win, y_train_win, y_train_win[:,0], cache_dir=train_config.model_cache_dir, 
-                    test_sets = test_sets, eval_metrics=self.eval_metrics,
-                    keep_model_in_mem=train_config.keep_model_in_mem)
+            fit_args = {"dX": dX_train_win, "py": py_train_win}
+            y_probas_list, dX_probas_list = est.fit_transform(
+                X_train_win, y_train_win, y_train_win[:, 0],
+                cache_dir=train_config.model_cache_dir, 
+                test_sets=test_sets, eval_metrics=self.eval_metrics,
+                keep_model_in_mem=train_config.keep_model_in_mem, **fit_args
+            )
 
             for pi, phase in enumerate(phases):
-                y_proba = y_probas[pi].reshape((-1, nh, nw, self.n_classes)).transpose((0, 3, 1, 2))
-                LOGGER.info('[data][{},{}] tops[{}].shape={}'.format(self.name, phase, ti, y_proba.shape))
-                self.data_cache.update(phase, self.top_names[ti], y_proba)
+                mean_proba = y_probas_list[pi].reshape((-1, nh, nw, self.n_classes)).transpose((0, 3, 1, 2))
+                std_proba = dX_probas_list[pi].reshape((-1, nh, nw, self.n_classes)).transpose((0, 3, 1, 2))
+
+                # Store mean predictions under the normal top name
+                self.data_cache.update(phase, self.top_names[ti], mean_proba)
+                # NEW: Store uncertainty under a new, prefixed name
+                self.data_cache.update(phase, f"dX_{self.top_names[ti]}", std_proba)
+
             if train_config.keep_model_in_mem:
                 self.estimator1d[ti] = est
     
