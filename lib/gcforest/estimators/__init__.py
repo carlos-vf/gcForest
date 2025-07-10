@@ -10,6 +10,7 @@ from .base_estimator import BaseClassifierWrapper
 from .sklearn_estimators import GCSGDClassifier,GCLR, GCExtraTreesClassifier, GCRandomForestClassifier, GCXGBClassifier
 #from .xgb_estimator import GCXGBClassifier
 from .kfold_wrapper import KFoldWrapper
+import PRF4DF
 
 def get_estimator_class(est_type):
     if est_type == "ExtraTreesClassifier":
@@ -22,6 +23,8 @@ def get_estimator_class(est_type):
         return GCSGDClassifier
     if est_type == "XGBClassifier":
         return GCXGBClassifier
+    if est_type == "ProbabilisticRandomForest":
+        return PRF4DF.SklearnCompatiblePRF
     #if est_type == "XGBClassifier":
     #    return GCXGBClassifier
     raise ValueError('Unkown Estimator Type, est_type={}'.format(est_type))

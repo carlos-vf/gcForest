@@ -35,13 +35,18 @@ class FGConcatLayer(BaseLayer):
 
     def _transform(self, phases):
         """
-        bottoms:
-            for example: n x Ci x w x h
+        Concatenates both the feature arrays and their corresponding
+        uncertainty arrays.
         """
+        # Define the name for the uncertainty output top
+        dX_top_name = f"dX_{self.top_names[0]}"
+
         for phase in phases:
-            # check top cache
-            if self.check_top_cache([phase], 0)[0]:
+            # Check if both feature and uncertainty tops are already cached
+            if self.check_top_cache([phase], 0)[0] and self.data_cache.get(phase, dX_top_name) is not None:
                 continue
+            
+            # --- Handle Feature Arrays (X) ---
             bottoms = self.data_cache.gets(phase, self.bottom_names)
             LOGGER.info('[data][{},{}] bottoms.shape={}'.format(self.name, phase, repr_blobs_shape(bottoms)))
             if self.axis == -1:
@@ -50,5 +55,22 @@ class FGConcatLayer(BaseLayer):
                 concat_data = np.concatenate(bottoms, axis=1)
             else:
                 concat_data = np.concatenate(bottoms, axis=self.axis)
+            
             LOGGER.info('[data][{},{}] tops[0].shape={}'.format(self.name, phase, concat_data.shape))
             self.data_cache.update(phase, self.top_names[0], concat_data)
+
+            # --- Handle Uncertainty Arrays (dX) ---
+            # Create the corresponding names for the uncertainty bottoms
+            dX_bottom_names = [f"dX_{name}" for name in self.bottom_names]
+            dX_bottoms = self.data_cache.gets(phase, dX_bottom_names)
+            
+            LOGGER.info('[data][{},{}] dX_bottoms.shape={}'.format(self.name, phase, repr_blobs_shape(dX_bottoms)))
+            if self.axis == -1:
+                for i, dX_bottom in enumerate(dX_bottoms):
+                    dX_bottoms[i] = dX_bottom.reshape((dX_bottom.shape[0], -1))
+                concat_dX_data = np.concatenate(dX_bottoms, axis=1)
+            else:
+                concat_dX_data = np.concatenate(dX_bottoms, axis=self.axis)
+            
+            LOGGER.info('[data][{},{}] dX_tops[0].shape={}'.format(self.name, phase, concat_dX_data.shape))
+            self.data_cache.update(phase, dX_top_name, concat_dX_data)

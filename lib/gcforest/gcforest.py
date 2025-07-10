@@ -21,46 +21,60 @@ class GCForest(object):
         else:
             self.ca = None
 
-    def fit_transform(self, X_train, y_train, X_test=None, y_test=None, train_config=None):
+    def fit_transform(self, X_train, y_train=None, X_test=None, y_test=None, train_config=None, dX=None, py=None):
+        """
+        Fit the GCForest model.
+
+        If `y_train` is not provided, discrete labels will be derived from `py`.
+        """
+        if y_train is None:
+            if py is None:
+                raise ValueError(
+                    "Either 'y_train' (discrete labels) or 'py' (probabilistic labels) "
+                    "must be provided to the fit_transform method."
+                )
+            LOGGER.info("y_train not provided. Deriving discrete labels from py using argmax.")
+            y_train = np.argmax(py, axis=1)
+
         train_config = train_config or self.train_config
         if X_test is None or y_test is None:
             if "test" in train_config.phases:
                 train_config.phases.remove("test")
             X_test, y_test = None, None
+        
         if self.fg is not None:
             self.fg.fit_transform(X_train, y_train, X_test, y_test, train_config)
             X_train = self.fg.get_outputs("train")
             if "test" in train_config.phases:
                 X_test = self.fg.get_outputs("test")
+        
         if self.ca is not None:
-            _, X_train, _, X_test, _, = self.ca.fit_transform(X_train, y_train, X_test, y_test, train_config=train_config)
+            _, X_train, _, X_test, _, = self.ca.fit_transform(
+                X_train, y_train, X_test, y_test, train_config=train_config, dX=dX, py=py
+            )
 
         if X_test is None:
             return X_train
         else:
             return X_train, X_test
 
-    def transform(self, X):
-        """
-        return:
-            if only finegrained proviede: return the result of Finegrained
-            if cascade is provided: return N x (n_trees in each layer * n_classes)
-        """
+    def transform(self, X, dX=None):
         if self.fg is not None:
             X = self.fg.transform(X)
-        y_proba = self.ca.transform(X)
+        y_proba = self.ca.transform(X, dX=dX)
         return y_proba
 
-    def predict_proba(self, X):
+    def predict_proba(self, X, dX=None):
         if self.fg is not None:
             X = self.fg.transform(X)
-        y_proba = self.ca.predict_proba(X)
+        y_proba = self.ca.predict_proba(X, dX=dX)
         return y_proba
 
-    def predict(self, X):
-        y_proba = self.predict_proba(X)
+    def predict(self, X, dX=None):
+        y_proba = self.predict_proba(X, dX=dX)
         y_pred = np.argmax(y_proba, axis=1)
         return y_pred
+
 
     def set_data_cache_dir(self, path):
         self.train_config.data_cache.cache_dir = path

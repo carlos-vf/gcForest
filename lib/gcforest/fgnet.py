@@ -38,19 +38,29 @@ class FGNet(object):
             self.layers.append(layer)
             self.name2layer[layer.name] = layer
 
-
-    def fit_transform(self, X_train, y_train, X_test, y_test, train_config):
+    def fit_transform(self, X_train, y_train, X_test, y_test, train_config, dX=None, py=None):
         """
-        delete_layer (bool): defalut=False
-            When X_test is not None and there is no need to run test, delete layer in realtime to save mem
-             
+        Trains the fine-grained layers.
         """
         LOGGER.info("X_train.shape={}, y_train.shape={}, X_test.shape={}, y_test.shape={}".format(
             X_train.shape, y_train.shape, None if X_test is None else X_test.shape, None if y_test is None else y_test.shape))
+        
+        # Set the primary data in the cache
         self.data_cache.reset("train", X_train, y_train)
+        
+        # NEW: Add uncertainty arrays to the training cache
+        if dX is not None:
+            self.data_cache.add("train", "dX", dX)
+        if py is not None:
+            self.data_cache.add("train", "py", py)
+
         if "test" in train_config.phases:
             self.data_cache.reset("test", X_test, y_test)
+            # You could add dX_test here as well if it's available
+            # For now, we assume test data is clean for simplicity.
+
         for li, layer in enumerate(self.layers):
+            # The layers will now be able to pull dX and py from the cache
             layer.fit_transform(train_config)
 
     @staticmethod
@@ -61,12 +71,25 @@ class FGNet(object):
             datas[i] = data.reshape((data.shape[0], -1))
         return np.concatenate(datas, axis=1)
 
-    def transform(self, X_test):
+    def transform(self, X_test, dX=None):
         LOGGER.info("X_test.shape={}".format(X_test.shape))
         self.data_cache.reset("test", X_test, None)
+        
+        # NEW: Add dX to the prediction cache if provided
+        if dX is not None:
+            self.data_cache.add("test", "dX", dX)
+
         for li, layer in enumerate(self.layers):
             layer.transform()
         return self.get_outputs("test")
+
+    def score(self):
+        for li, layer in enumerate(self.layers):
+            layer.score()
+
+    def get_outputs(self, phase):
+        outputs = self.data_cache.gets(phase, self.outputs)
+        return outputs
 
     def score(self):
         for li, layer in enumerate(self.layers):
